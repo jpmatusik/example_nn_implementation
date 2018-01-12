@@ -25,8 +25,8 @@ class MyNN:
     def __init__(self, config=None):
         self.layers = []
 
-    def add_layer(self, weight_array, bias_vector, activation_function):
-        self.layers.append(MyLayer(weight_array, bias_vector, activation_function))
+    def add_layer(self, weight_array, bias_vector, activation_function, activation_derivative=None):
+        self.layers.append(MyLayer(weight_array, bias_vector, activation_function, activation_derivative))
 
     def forward(self, data, stop_at=None, return_all_activations=False):
         # initial activations are the input data
@@ -41,25 +41,42 @@ class MyNN:
             all_activations.append(activations)
         return all_activations if return_all_activations else activations
 
-    def backward(self, data, labels):
-        # do batch gradient descent
-        activation_list = []
-        # get all activations since they will all be used to adjust the NN weights
-        a0, a1, a2 = self.forward(data, return_all_activations=True)
-        w1, w2 = [layer.weight_array for layer in self.layers]
+    def backward(self, data, labels, activation_list):
+        # batch gradient descent
+        # get in reverse order since we are walking backwards through the network
+        weights_list = [layer.weight_array for layer in self.layers][::-1]
 
-        delta2 = labels - a2
-        grad_w2 = a1.T.dot(delta2)
-        grad_b2 = delta2.sum(axis=0)
+        # calculate the deltas
+        # walk through layers backwards
+        for index, layer in enumerate(self.layers[::-1]):
+            # activations from current layer
+            a = activation_list[index]
+            if not index:
+                inputs = {'a': a, 'labels': labels}
+                delta_list = [layer.activation_derivative(**inputs)]
+            else:
+                previous_delta = delta_list[index - 1]
+                # weighting matrix from previous layer
+                w = weights_list[index - 1]
+                # calculate the new delta
+                delta = previous_delta.dot(w.T) * layer.activation_derivative(a)
+                delta_list.append(delta)
 
-        delta1 = delta2.dot(w2.T)
-        grad_w1 = a0.T.dot(delta1 * a1*(1 - a1))
-        grad_b1 = (delta1 * a1*(1 - a1)).sum(axis=0)
+        # return bias_gradients in reverse order to match what update_weights expects
+        bias_gradients = [delta.sum(axis=0) for delta in delta_list][::-1]
 
-        return (
-            { 'bias_gradients': [grad_b1, grad_b2]
-             , 'weight_gradients': [grad_w1, grad_w2]}
-            , a2)
+        weight_gradients = []
+        for index, delta in enumerate(delta_list):
+            # activation_list has activations in reverse order and is one element bigger than delta_list
+            a_previous = activation_list[index + 1]
+            weight_gradients.append(a_previous.T.dot(delta))
+
+        weight_gradients = weight_gradients[::-1]
+
+        return ({  'bias_gradients': bias_gradients
+                 , 'weight_gradients': weight_gradients
+                }
+               )
 
     def update_weights(self, learning_rate, gradients):
         self.layers[0].weight_array = self.layers[0].weight_array + learning_rate*gradients['weight_gradients'][0]
@@ -68,11 +85,13 @@ class MyNN:
         self.layers[0].bias_vector = self.layers[0].bias_vector + learning_rate*gradients['bias_gradients'][0]
         self.layers[1].bias_vector = self.layers[1].bias_vector + learning_rate*gradients['bias_gradients'][1]
 
-
     def train(self, data, labels, learning_rate, iterations):
         for i in range(iterations):
+            # get in reverse order since we are walking backwards through the network
+            activation_list = self.forward(data, return_all_activations=True)[::-1]
+            output = activation_list[0]
             # get the gradients
-            gradients, output = self.backward(data, labels)
+            gradients = self.backward(data, labels, activation_list)
             # use the gradients to updates the weights
             self.update_weights(learning_rate, gradients)
             c = cost(labels, output)
@@ -82,7 +101,8 @@ class MyNN:
 
 
 class MyLayer:
-    def __init__(self, weight_array, bias_vector, activation_function):
+    def __init__(self, weight_array, bias_vector, activation_function, activation_derivative=None):
         self.weight_array = weight_array
         self.bias_vector = bias_vector
         self.activation_function = activation_function
+        self.activation_derivative = activation_derivative
