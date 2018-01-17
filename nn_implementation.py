@@ -4,7 +4,10 @@ def classification_accuracy(actual_labels, predicted_labels):
     return np.mean(actual_labels == predicted_labels)
 
 def cross_entropy(y_indicator, nn_output):
-    tot = y_indicator * np.log(nn_output)
+    if len(y_indicator.shape) > 1:
+        tot = y_indicator * np.log(nn_output)
+    else:
+        tot = y_indicator * np.log(nn_output) + (1-y_indicator) * np.log(1-nn_output)
     return tot.sum()
 
 def sigmoid(z):
@@ -15,6 +18,7 @@ def softmax(z):
     return z_exp/z_exp.sum(axis=1, keepdims=True) if len(z_exp.shape)==2 else z_exp/sum(z_exp)
 
 class MyNN:
+
     def __init__(self, config=None):
         self.layers = []
 
@@ -55,7 +59,10 @@ class MyNN:
                 # weighting matrix from previous layer
                 w = weight_matrices[index - 1]
                 # calculate the new delta
-                delta = previous_delta.dot(w.T) * layer.activation_derivative(a)
+                if len(w.shape) > 1:
+                    delta = previous_delta.dot(w.T) * layer.activation_derivative(a)
+                else:
+                    delta = np.outer(previous_delta, w) * layer.activation_derivative(a)
                 deltas.append(delta)
 
         # return bias_gradients in forward order to match what update_weights expects
@@ -87,10 +94,11 @@ class MyNN:
             # use the gradients to updates the weights
             self.update_weights(learning_rate, gradients)
             cost = cross_entropy(yInd_train, nn_output)
-            actual_labels = np.argmax(yInd_train, axis=1)
-            predicted_labels = np.argmax(nn_output, axis=1)
+            actual_labels = np.argmax(yInd_train, axis=1) if len(yInd_train.shape) > 1 else yInd_train
+            predicted_labels = np.argmax(nn_output, axis=1) if len(yInd_train.shape) > 1 else np.round(nn_output)
             accuracy = classification_accuracy(actual_labels, predicted_labels)
-            print("cost:", cost, "accuracy:", accuracy)
+            if not i % 1000:
+                print("cost:", cost, "accuracy:", accuracy)
 
 
 class MyLayer:
