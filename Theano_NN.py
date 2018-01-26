@@ -2,8 +2,8 @@ from sklearn.utils import shuffle
 import numpy as np
 import theano
 import theano.tensor as T
-
 import matplotlib.pyplot as plt
+import time
 
 # to define a hidden layer we need:
 # - fan_in
@@ -20,51 +20,61 @@ import matplotlib.pyplot as plt
 #   - this les us take advantage of the 'updates' argument of theano functions
 #     - this is key to conveniently updating the weights and bias terms using the gradient
 # - layer_id to uniquely identify the W and B between layers.
-# - the last thing we need is self.params. It's not obvious why we'd need this here until
-#   we go to calculate things. It just makes things a little nicer.
 
 class HiddenLayer:
     def __init__(self, fan_in, fan_out, layer_id, activation_function=None):
+        self.fan_in = fan_in
+        self.fan_out = fan_out
         self.layer_id = layer_id
+        # default to relu activation function
+        self.activation_function = T.nnet.relu if activation_function is None else activation_function
         # initialize weights as standard normal with Var = 1/number of nodes in the layer
-        W = np.random.randn(fan_in, fan_out) / np.sqrt(fan_out)
+        W = np.random.randn(fan_in, fan_out) * np.sqrt(2.0/fan_in)
         # initialize bias terms as 0
         B = np.zeros(fan_out)
         # create Theano shared variables and assign meaningful layer_ids for debugging
         self.W = theano.shared(W, 'W_%s' % self.layer_id)
         self.B = theano.shared(B, 'B_%s' % self.layer_id)
-        self.params = [self.W, self.B]
-        # default to relu activation function
-        self.activation_function = T.nnet.relu if activation_function is None else activation_function
 
     def forward(self, X):
+        # use alpha of .1 it activation function is relu
+        if self.activation_function == T.nnet.relu:
+            return self.activation_function(X.dot(self.W) + self.B, alpha=0.1)
         return self.activation_function(X.dot(self.W) + self.B)
 
+
+# defaulting to the softmax output function
 class TheanoNN:
     def __init__(self, input_layer_size, hidden_layer_sizes, output_layer_size, output_layer_act_f=T.nnet.softmax):
         self.input_layer_size = input_layer_size
         self.hidden_layer_sizes = hidden_layer_sizes
         self.output_layer_size = output_layer_size
         self.output_layer_act_f = output_layer_act_f
-        self.layers = []
-        self.params = []
 
-        # initialize layers - starting with the hidden layers
+        # initialize NN layers - start with the hidden layers
+        self.layers = []
         layer_id = 1
+        # fan_in for first hidden layer is the number of features in the raw data
         fan_in = self.input_layer_size
         for fan_out in self.hidden_layer_sizes:
             self.layers.append(HiddenLayer(fan_in, fan_out, layer_id))
-            layer_id +=1
             # the fan_out of the current layer becomes the fan_in of the next
             fan_in = fan_out
+            layer_id +=1
+
         # initialize layers - add the output layer
         self.layers.append(HiddenLayer(fan_in, self.output_layer_size, layer_id, self.output_layer_act_f))
 
         # collect all params in the model
+        self.all_weights = []
+        self.all_biases = []
         for layer in self.layers:
-            self.params += layer.params
+            self.all_weights += [layer.W]
+            self.all_biases += [layer.B]
 
-    def fit(self, Xtrain, Ytrain, Xvalid=None, Yvalid=None, learning_rate=1e-3, mu=0.99, decay=0.999, epochs=500, batch_size=50, l2_penalty=1e-4, show_fig=False):
+    def fit(self, Xtrain, Ytrain, Xvalid=None, Yvalid=None, learning_rate=1e-3, mu=0.0, decay=0.999, l2_penalty=0, epochs=100, batch_size=None, print_period=100, show_fig=False):
+        # in this case I'm assuming Ytrain is a vector of labels that go from 0 to K-1.
+
         # mu is for momentum
         # decay is for RMSprop
         #   - i.e. the parameter to calculate the EWMA for each of the caches
@@ -82,62 +92,80 @@ class TheanoNN:
             Ytrain = Ytrain[:n_train]
 
         # for momentum
-        dparams = [theano.shared(np.zeros(p.get_value().shape)) for p in self.params]
+        param_deltas = [theano.shared(np.ones(p.get_value().shape)) for p in (self.all_weights + self.all_biases)]
         # for RMS_prop
-        cache = [theano.shared(np.zeros(p.get_value().shape)) for p in self.params]
+        cache = [theano.shared(np.ones(p.get_value().shape)) for p in (self.all_weights + self.all_biases)]
 
         # theano variables
         thX = T.matrix("thX")
-        thY_actual_labels = T.lvector("thY_actual_labels")
+        # this is a vector
+        thY = T.lvector("thY")
         # This is a matrix
         Y_predicted_probs = self.forward(thX)
 
-        # inputs for cost function
-        # TODO: in this case we're performing regularization on the bias terms as well... that doesn't make sense
-        # Solution would be to split up the weights and biases into their own instance variables.
-        l2_regularization = T.sum([(p * p).sum() for p in self.params])
+        # l2 regularization, scaled by the number of parameters
+        l2_regularization = l2_penalty * T.sum([(p*p).sum() for p in self.all_weights]) / len(self.all_weights)
+        # cross entropy, scaled by the number of observations
         # note that I'm indexing specifically the probs where Y is non-zero, as per the definition of cross entropy
-        xent = -T.log(Y_predicted_probs[T.arange(thY_actual_labels.shape[0]), thY_actual_labels])
-        cost = T.mean(xent) + l2_penalty*l2_regularization
+        xent = -T.mean(T.log(Y_predicted_probs[T.arange(thY.shape[0]), thY]))
+        cost = xent + l2_regularization
         prediction = self.predict(thX)
 
-        cost_predict_op = theano.function(
-          inputs=[thX, thY_actual_labels]
-        , outputs=[cost, prediction]
-        )
-
+        # we have to update the following:
+        # RMSprop cache
+        # the param_deltas
+        # the parameters themselves
         updates = (
-        # cache updates for RMS_prop
-          [(c, decay*c + (1-decay)*(T.grad(cost, p)**2)) for c, p in zip(cache, self.params)]
+          # RMSprop cache
+          [(c, decay*c + (1-decay) * (T.grad(cost, p)**2)) for c, p in zip(cache, (self.all_weights + self.all_biases))]
             +
-          [(p, p + mu*dp  - learning_rate * T.grad(cost, p)/T.sqrt(c + 1e-10)) for p, c, dp in zip(self.params, cache, dparams)]
+          # Parameters
+          [(p, p + mu*dp - learning_rate * T.grad(cost, p)/T.sqrt(c + 1e-10) ) for p, c, dp in zip((self.all_weights + self.all_biases), cache, param_deltas)]
             +
-          [(dp, mu*dp - learning_rate * T.grad(cost, p)/T.sqrt(c + 1e-10)) for p, c, dp in zip(self.params, cache, dparams)]
+          # Momentum update
+          [(dp, mu*dp - learning_rate * T.grad(cost, p)/T.sqrt(c + 1e-10) ) for p, c, dp in zip((self.all_weights + self.all_biases), cache, param_deltas)]
         )
 
+        # feed all those updates into a the training function
         train_op = theano.function(
-          inputs = [thX, thY_actual_labels]
+          inputs = [thX, thY]
         , updates = updates
         )
 
-        n_batches = Xtrain.shape[0] // batch_size
-        costs = []
+        # this function is used to report the cost and other performance metrics of the curent model
+        cost_predict_op = theano.function(
+          inputs=[thX, thY]
+        , outputs=[cost, prediction]
+        )
+
+        if batch_size is None:
+            batch_size = Xtrain.shape[0]
+
+        n_batches = int(Xtrain.shape[0] / batch_size)
+        self.costs = []
         for i in range(epochs):
+            # reshuffle the data at the start of each epoch
             Xtrain, Ytrain = shuffle(Xtrain, Ytrain)
             for j in range(n_batches):
+
+                start = time.time()
+                # get batch of data
                 Xbatch = Xtrain[j*batch_size:(j*batch_size+batch_size)]
                 Ybatch = Ytrain[j*batch_size:(j*batch_size+batch_size)]
 
+                # train the weights on this batch
                 train_op(Xbatch, Ybatch)
 
-                if j % 20 == 0:
-                    c, p = cost_predict_op(Xvalid, Yvalid)
-                    costs.append(c)
-                    e = error_rate(Yvalid, p)
-                    print("i:", i, "j:", j, "nb:", n_batches, "cost:", c, "error rate:", e)
+                if j % print_period == 0:
+                    c, p = cost_predict_op(Xbatch, Ybatch)
+                    self.costs.append(c)
+                    e = np.mean(Ybatch != p)
+                    c = np.round(c, 4)
+                    e = np.round(e, 4)
+                    print("train: ", str(time.time() - start),  "i:", i, "j:", j, "nb:", n_batches, "cost:", c, "error rate:", e)
 
         if show_fig:
-            plt.plot(costs)
+            plt.plot(self.costs)
             plt.show()
 
     def forward(self, X):
@@ -150,10 +178,3 @@ class TheanoNN:
     def predict(self, X):
         Y_predicted_probs = self.forward(X)
         return T.argmax(Y_predicted_probs, axis=1)
-
-
-
-X, Y = getData()
-# X, Y = getBinaryData()
-model = TheanoNN(input_layer_size=2304, hidden_layer_sizes=[2000,1000], output_layer_size=7)
-model.fit(X, Y, learning_rate=1e-10, mu=0.99, decay=0.999, epochs=10, batch_size=1006, l2_penalty=1e-4, show_fig=True)
