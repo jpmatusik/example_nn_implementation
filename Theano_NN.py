@@ -92,9 +92,12 @@ class TheanoNN:
             Ytrain = Ytrain[:n_train]
 
         # for momentum
-        param_deltas = [theano.shared(np.ones(p.get_value().shape)) for p in (self.all_weights + self.all_biases)]
+        # make sure to initialize param_deltas with 0's
+        param_deltas = [theano.shared(np.zeros_like(p.get_value())) for p in (self.all_weights + self.all_biases)]
         # for RMS_prop
-        cache = [theano.shared(np.ones(p.get_value().shape)) for p in (self.all_weights + self.all_biases)]
+        # this can be initialized to 1's or 0's
+        # better would be to use a bias correcting method.
+        cache = [theano.shared(np.ones_like(p.get_value())) for p in (self.all_weights + self.all_biases)]
 
         # theano variables
         thX = T.matrix("thX")
@@ -126,13 +129,19 @@ class TheanoNN:
           [(dp, mu*dp - learning_rate * T.grad(cost, p)/T.sqrt(c + 1e-10) ) for p, c, dp in zip((self.all_weights + self.all_biases), cache, param_deltas)]
         )
 
+        # updates = [
+        #     (p, p + mu*dp - learning_rate*g) for p, dp, g in zip(self.params, dparams, grads)
+        # ] + [
+        #     (dp, mu*dp - learning_rate*g) for dp, g in zip(dparams, grads)
+        # ]
+
         # feed all those updates into a the training function
         train_op = theano.function(
           inputs = [thX, thY]
         , updates = updates
         )
 
-        # this function is used to report the cost and other performance metrics of the curent model
+        # this function can used to report the cost and other performance metrics of the curent model
         cost_predict_op = theano.function(
           inputs=[thX, thY]
         , outputs=[cost, prediction]
