@@ -72,6 +72,22 @@ class TheanoNN:
             self.all_weights += [layer.W]
             self.all_biases += [layer.B]
 
+        # we want these to be a part of the instance so that when
+        # training resumes, we don't lose the deltas or cache. You can always get
+        # rid of them later if you want to
+
+        # for momentum
+        # make sure to initialize param_deltas with 0's
+        self.param_deltas = [theano.shared(np.zeros_like(p.get_value())) for p in (self.all_weights + self.all_biases)]
+        # for RMS_prop
+        # this can be initialized to 1's or 0's
+        # better would be to use a bias correcting method.
+        self.cache = [theano.shared(np.ones_like(p.get_value())) for p in (self.all_weights + self.all_biases)]
+
+        # I want to keep costs over all bursts of training
+        self.costs = []
+
+
     def fit(self, Xtrain, Ytrain, Xvalid=None, Yvalid=None, learning_rate=1e-3, mu=0.0, decay=0.999, l2_penalty=0, epochs=100, batch_size=None, print_period=100, show_fig=False):
         # in this case I'm assuming Ytrain is a vector of labels that go from 0 to K-1.
 
@@ -90,14 +106,6 @@ class TheanoNN:
             Yvalid = Ytrain[n_train:]
             Xtrain = Xtrain[:n_train,:]
             Ytrain = Ytrain[:n_train]
-
-        # for momentum
-        # make sure to initialize param_deltas with 0's
-        param_deltas = [theano.shared(np.zeros_like(p.get_value())) for p in (self.all_weights + self.all_biases)]
-        # for RMS_prop
-        # this can be initialized to 1's or 0's
-        # better would be to use a bias correcting method.
-        cache = [theano.shared(np.ones_like(p.get_value())) for p in (self.all_weights + self.all_biases)]
 
         # theano variables
         thX = T.matrix("thX")
@@ -120,20 +128,14 @@ class TheanoNN:
         # the parameters themselves
         updates = (
           # RMSprop cache
-          [(c, decay*c + (1-decay) * (T.grad(cost, p)**2)) for c, p in zip(cache, (self.all_weights + self.all_biases))]
+          [(c, decay*c + (1-decay) * (T.grad(cost, p)**2)) for p, c in zip((self.all_weights + self.all_biases), self.cache)]
             +
           # Parameters
-          [(p, p + mu*dp - learning_rate * T.grad(cost, p)/T.sqrt(c + 1e-10) ) for p, c, dp in zip((self.all_weights + self.all_biases), cache, param_deltas)]
+          [(p, p + mu*dp - learning_rate * T.grad(cost, p)/T.sqrt(c + 1e-10) ) for p, c, dp in zip((self.all_weights + self.all_biases), self.cache, self.param_deltas)]
             +
           # Momentum update
-          [(dp, mu*dp - learning_rate * T.grad(cost, p)/T.sqrt(c + 1e-10) ) for p, c, dp in zip((self.all_weights + self.all_biases), cache, param_deltas)]
+          [(dp, mu*dp - learning_rate * T.grad(cost, p)/T.sqrt(c + 1e-10) ) for p, c, dp in zip((self.all_weights + self.all_biases), self.cache, self.param_deltas)]
         )
-
-        # updates = [
-        #     (p, p + mu*dp - learning_rate*g) for p, dp, g in zip(self.params, dparams, grads)
-        # ] + [
-        #     (dp, mu*dp - learning_rate*g) for dp, g in zip(dparams, grads)
-        # ]
 
         # feed all those updates into a the training function
         train_op = theano.function(
@@ -151,7 +153,6 @@ class TheanoNN:
             batch_size = Xtrain.shape[0]
 
         n_batches = int(Xtrain.shape[0] / batch_size)
-        self.costs = []
         for i in range(epochs):
             # reshuffle the data at the start of each epoch
             Xtrain, Ytrain = shuffle(Xtrain, Ytrain)
